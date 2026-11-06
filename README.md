@@ -2,7 +2,7 @@
 
 Sistema embebido sobre **Raspberry Pi 3B** que lee un radar de 60 GHz **HLK-LD6002** por UART, extrae frecuencia respiratoria, ritmo cardíaco, distancia y posición de una persona sin contacto, y los muestra en una **aplicación web en tiempo real**. Incluye registro automático en CSV y una comparación del pulso contra un dispositivo de referencia (anillo **Colmi R06**).
 
-Proyecto de la asignatura **[Sistemas Embebidos]** · **[Nombre]** · **[Profesor]** · **[Universidad / Año]**
+Proyecto de la asignatura **[Sistemas Embebidos]** · **Lina Maria Ramirez y Valentina Rozo** · **Universidad Javeriana / 2026**
 
 > **Aviso:** es un proyecto académico. Ni el radar ni el anillo son instrumentos médicos, y las mediciones no sirven para diagnóstico.
 
