@@ -1,0 +1,16 @@
+[Unit]
+Description=Radar LD6002 (monitor de signos vitales)
+After=network.target bluetooth.target
+
+[Service]
+User=radar
+Group=radar
+WorkingDirectory=/opt/radar
+ExecStart=/opt/radar/venv/bin/python -u app.py
+Nice=-5
+Restart=always
+RestartSec=3
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target
