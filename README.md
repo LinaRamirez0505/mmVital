@@ -20,11 +20,10 @@ La frecuencia cardíaca y la respiratoria se miden normalmente con sensores de c
 - [Qué hace](#qué-hace)
 - [Hardware](#hardware)
 - [Conexiones](#conexiones)
-- [Configuración de la Raspberry Pi](#configuración-de-la-raspberry-pi)
+- [Instalación](#instalación)
 - [Arquitectura de software](#arquitectura-de-software)
 - [Protocolo del radar](#protocolo-del-radar)
 - [Aplicación web](#aplicación-web)
-- [Instalación como servicio](#instalación-como-servicio)
 - [Relación con los talleres de la clase](#relación-con-los-talleres-de-la-clase)
 - [Datos generados](#datos-generados)
 - [Comparación con el anillo Colmi R06](#comparación-con-el-anillo-colmi-r06)
@@ -95,9 +94,22 @@ El radar se alimenta con 5 V y su UART trabaja a 3,3 V, compatible con los GPIO 
 
 > El orden de pines puede variar según la versión del módulo. Revisa la serigrafía.
 
-## Configuración de la Raspberry Pi
+## Instalación
 
-### 1. UART para el radar
+Pasos para montar el sistema desde cero en una Raspberry Pi 3B.
+
+### 1. Sistema operativo
+
+1. Grabar **Raspberry Pi OS de 64 bits** en la microSD con Raspberry Pi Imager. En las opciones avanzadas, configurar el usuario, la red WiFi y habilitar **SSH**.
+2. Arrancar la Pi, entrar por SSH y actualizar:
+
+```bash
+sudo apt update && sudo apt full-upgrade -y
+```
+
+3. Hacer las [conexiones](#conexiones) con la Pi **apagada**.
+
+### 2. UART para el radar
 
 En la Pi 3B, el UART principal (PL011, `ttyAMA0`) lo ocupa el Bluetooth por defecto y `serial0` apunta al mini-UART (`ttyS0`), que es poco fiable. Se mueve el Bluetooth al mini-UART para liberar el UART bueno.
 
@@ -122,7 +134,7 @@ Verificar que `/dev/serial0` apunte a `ttyAMA0`:
 ls -l /dev/serial0
 ```
 
-### 2. Permisos del puerto serie
+### 3. Permisos del puerto serie
 
 ```bash
 sudo usermod -aG dialout $USER
@@ -130,11 +142,88 @@ sudo usermod -aG dialout $USER
 
 (Cerrar sesión y volver a entrar.) Sin esto aparece `Permission denied` en `/dev/serial0`.
 
-### 3. Baudrate
-
 El radar transmite a **115200 baudios**. El valor se determinó con `diagnostico/scan_baud.py`, que prueba varias velocidades y cuenta tramas con checksum válido: solo 115200 produjo tramas válidas.
 
+### 4. Dependencias y código
+
+```bash
+sudo apt install -y git python3-flask python3-serial python3-venv bluez
+git clone https://github.com/LinaRamirez0505/mmVital.git
+cd mmVital
+```
+
+Si se usa **otro anillo**, cambiar su dirección Bluetooth en `RING_ADDR` (`radar/app.py`) y en `ADDR` (`radar/leer_anillo.py`). La dirección se obtiene con `bluetoothctl scan on`. Sin anillo, el radar funciona igual; la comparación simplemente no se llena.
+
+### 5. Prueba manual (opcional, recomendada)
+
+Antes de instalar el servicio, comprobar que llegan tramas del radar:
+
+```bash
+PYTHONPATH=radar python3 diagnostico/ver_frames.py   # 10 s; debe listar tipos 0x0A13, 0x0A14, 0x0A15…
+python3 radar/app.py                                 # abrir http://IP_DE_LA_PI:5000 y luego Ctrl+C
+```
+
+Si no aparece ningún tipo, revisar que TX/RX estén cruzados y que `/dev/serial0` apunte a `ttyAMA0`. Si el servicio ya está instalado, detenerlo antes (`sudo systemctl stop radar`), porque solo un programa puede usar el puerto a la vez.
+
+### 6. Instalación como servicio
+
+```bash
+mkdir -p ~/proyecto && cp -r radar/* ~/proyecto/ && cp scripts/instalar.sh ~/proyecto/
+cd ~/proyecto && bash instalar.sh
+```
+
+El instalador:
+
+1. Crea el usuario de sistema `radar` (sin login) en los grupos `dialout` y `bluetooth`.
+2. Copia el código a `/opt/radar` y crea su entorno virtual de Python (con `--system-site-packages` para usar Flask y pyserial del sistema) e instala `colmi-r02-client`.
+3. Instala `radar.service` (prioridad `Nice=-5`, `Restart=always`) y lo habilita al arranque.
+4. Programa con cron un resumen diario a las 00:10 y la limpieza de CSV de más de 30 días.
+5. Fija la zona horaria en `America/Bogota`.
+
+Para actualizar el código, se repite el paso 6 (el instalador se puede ejecutar varias veces) y luego se reinicia el servicio con `sudo systemctl restart radar`: el instalador copia los archivos, pero no reinicia un servicio que ya está corriendo.
+
+### 7. Verificación
+
+```bash
+systemctl status radar                 # debe decir active (running)
+journalctl -u radar -n 30 --no-pager   # últimos mensajes del servicio
+sudo crontab -u radar -l               # tareas programadas
+sudo systemctl restart radar           # reiniciar tras un cambio
+```
+
+La web queda en `http://IP_DE_LA_PI:5000` desde cualquier equipo de la misma red (la IP se obtiene con `hostname -I`).
+
 ## Arquitectura de software
+
+### Vista general
+
+El sistema se organiza en tres capas: **adquisición** (radar y anillo), **procesamiento** en la Raspberry Pi y **aplicación** (panel web, registro y alertas).
+
+```mermaid
+flowchart LR
+    subgraph ADQ["Adquisición"]
+        R["Radar HLK-LD6002<br/>60 GHz FMCW<br/>respiración · pulso<br/>distancia · posición"]
+        A["Anillo Colmi R06<br/>referencia de pulso<br/>SpO2 · batería"]
+    end
+    subgraph PRO["Procesamiento · Raspberry Pi 3B"]
+        H["Hilos: lector · procesador<br/>registrador · sistema · anillo<br/>queue.Queue + Lock"]
+        F["Flask + SSE · puerto 5000"]
+        S["systemd · Restart=always · Nice −5"]
+    end
+    subgraph APP["Aplicación"]
+        W["Panel web<br/>respiración · pulso<br/>ondas y tendencias"]
+        C[("Registro CSV<br/>un archivo por día<br/>resumen 00:10 (cron)")]
+        L["Alertas<br/>resp. #lt; 8 o #gt; 25 rpm<br/>pulso #lt; 50 o #gt; 120 bpm<br/>#gt; 10 s sin presencia"]
+    end
+    R -- "UART 115200" --> H
+    A -- "BLE (subproceso)" --> H
+    H --> F
+    F -- "SSE" --> W
+    H -- "CSV" --> C
+    F -- "rangos" --> L
+```
+
+### Hilos y flujo interno
 
 ```mermaid
 flowchart LR
@@ -162,6 +251,26 @@ flowchart LR
 | `anillo` | Lanza la lectura del anillo como proceso aparte y calcula el error. |
 
 Los hilos se comunican con una `queue.Queue` y el estado compartido se protege con un `threading.Lock`. La lectura del anillo corre en un **proceso separado** para que cualquier bloqueo del Bluetooth no afecte al radar.
+
+### Recorrido de un dato
+
+1. El radar envía unas 100 tramas por segundo por el UART a 115200 baudios.
+2. `lector` las separa con `LD6002.frames()`, que valida ambos checksums, y las mete en la cola (`maxsize=2000`). Si la cola se llena, la trama se descarta y se cuenta, sin bloquear la lectura del puerto.
+3. `procesador` decodifica cada trama según su tipo (fases, respiración, pulso, distancia, posición) y actualiza el estado compartido bajo el `Lock`.
+4. Cada segundo, `registrador` copia el estado a una fila del CSV del día (solo si llegaron datos en los últimos 2 s) y, si hay presencia, guarda el pulso en un historial de 300 s.
+5. Cuando llega una lectura del anillo, `anillo` promedia ese historial en los últimos 25 s, calcula el error y escribe una fila en el CSV de comparación.
+6. Cada 50 ms, la ruta `/stream` envía el estado en JSON a cada navegador conectado. `index.html` dibuja tarjetas, gráficas (Chart.js) y alertas.
+7. Al recibir `SIGTERM` (por ejemplo con `systemctl stop`), el programa termina el subproceso del anillo y lo desconecta por Bluetooth antes de salir, para que la siguiente conexión no encuentre el anillo ocupado.
+
+### Despliegue en la Pi
+
+| Elemento | Ubicación |
+|---|---|
+| Código y CSV | `/opt/radar/` (dueño `radar:radar`) |
+| Entorno de Python | `/opt/radar/venv/` |
+| Demonio | `/etc/systemd/system/radar.service` (copia de `systemd/radar.service`) |
+| Tareas programadas | `crontab` del usuario `radar` |
+| Logs | `journalctl -u radar` y `/opt/radar/cron.log` |
 
 ### Correspondencia con los módulos de la propuesta
 
@@ -213,41 +322,6 @@ Servidor **Flask** en el puerto 5000. Los datos se envían al navegador con **Se
 | `/comparacion.csv` | Descarga el CSV de la comparación radar vs anillo |
 
 Alertas configuradas: respiración < 8 o > 25 rpm, pulso < 50 o > 120 bpm, y más de 10 s sin presencia. Las etiquetas "Normal / Baja / Alta" usan 12–20 rpm y 60–100 bpm como rangos de adulto en reposo.
-
-## Instalación como servicio
-
-Dependencias del sistema (el entorno virtual usa los paquetes del sistema para Flask y pyserial):
-
-```bash
-sudo apt install python3-flask python3-serial python3-venv bluez
-```
-
-Con el repositorio clonado en la Pi:
-
-```bash
-git clone https://github.com/LinaRamirez0505/mmVital.git
-cd mmVital
-# copiar el código a la carpeta de trabajo del instalador
-mkdir -p ~/proyecto && cp -r radar/* ~/proyecto/ && cp scripts/instalar.sh ~/proyecto/
-cd ~/proyecto && bash instalar.sh
-```
-
-El instalador:
-
-1. Crea el usuario de sistema `radar` (sin login) en los grupos `dialout` y `bluetooth`.
-2. Copia el código a `/opt/radar` y crea su entorno virtual de Python.
-3. Instala `radar.service` (prioridad `Nice=-5`, `Restart=always`) y lo habilita al arranque.
-4. Programa con cron un resumen diario a las 00:10 y la limpieza de CSV de más de 30 días.
-
-Comandos útiles:
-
-```bash
-systemctl status radar
-journalctl -u radar -n 30 --no-pager
-sudo systemctl restart radar
-```
-
-La web queda en `http://IP_DE_LA_PI:5000` (la IP se obtiene con `hostname -I`).
 
 ## Relación con los talleres de la clase
 
